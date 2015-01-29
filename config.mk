@@ -2,12 +2,17 @@
 # Copyright Altera 2014
 # All Rights Reserved.
 #
+###### modified
+SOCEDS_DEST_ROOT ?= /scratch/altera/14.1/embedded
+PATH := $(SOCEDS_DEST_ROOT)/host_tools/mentor/gnu/arm/baremetal/bin:$(SOCEDS_DEST_ROOT)/host_tools/altera/mkpimage:$(PATH)
 
 # Must be set to either SDMMC or QSPI
-#BOOT_SOURCE := SDMMC
+###### modified
+BOOT_SOURCE := SDMMC
 
 # Must be set to either C5 (Cyclone5) or A5 (Arria5)
-#DEVICE      := C5
+###### modified
+DEVICE      := C5
 
 # Set this to have MPL print status to serial out, or 0 for no status
 PRINTF_UART := 1

@@ -190,7 +190,8 @@ all: $(OBJ_ELF)
 .DEFAULT_GOAL := $(OBJ_ELF)
 $(OBJ_ELF): $(OBJS) Makefile
 	$(LD) $(LDFLAGS) $(OBJS) -o $@
-	fromelf --bin --output=$(basename $@).bin $@
+	##### modified
+	$(OC) -O binary $@ $(basename $@).bin
 	mkpimage --header-version 0 -o $(basename $@)-mkpimage.bin $(basename $@).bin $(basename $@).bin $(basename $@).bin $(basename $@).bin
 	#arm-altera-eabi-objdump -DS $@ > $@.txt
 
