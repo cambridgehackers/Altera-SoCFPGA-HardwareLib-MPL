@@ -63,15 +63,69 @@ ALT_SDMMC_CARD_MISC_t card_misc_cfg;
 uint8_t sdmmc_buf[SDMMC_BLOCK_SZ];
 img_header_t *img_hdr_p;
 
-//from crc32.c
-extern uint32_t crc32(uint32_t crc, const uint8_t * buf, uint32_t size);
 typedef void (*FXN_PTR) (void);
+static uint32_t image_addr;
+
+static ALT_STATUS_CODE load_region(uint32_t sd_addr, int loading_fpga)
+{
+    int i;
+    uint32_t *data_src_p, *data_dest_p;
+    ALT_STATUS_CODE status = alt_sdmmc_read(&card_info, sdmmc_buf, (void *)sd_addr, SDMMC_BLOCK_SZ);
+    if (status != ALT_E_SUCCESS) {
+        ALT_PRINTF("SDMMC read header ERROR\n\r");
+        return status;
+    }
+    img_hdr_p = (img_header_t *) sdmmc_buf;
+    //swap endianess
+    if (!loading_fpga && MKIMG_MAGIC != SWAP_UINT32(img_hdr_p->magic)) {
+        ALT_PRINTF("Invalid Image Magic #\n\r");
+        return -1;
+    };
+    img_hdr_p->img_size = SWAP_UINT32(img_hdr_p->img_size);
+    img_hdr_p->load_addr = SWAP_UINT32(img_hdr_p->load_addr);
+    if (!loading_fpga)
+        image_addr = img_hdr_p->load_addr + SWAP_UINT32(img_hdr_p->entry_point);
+    data_src_p = (uint32_t *) & sdmmc_buf[IMG_HDR_SZ]; //start copying after the img header
+    data_dest_p = (uint32_t *) img_hdr_p->load_addr;
+    if (img_hdr_p->img_size > (SDMMC_BLOCK_SZ - IMG_HDR_SZ)) {
+        //copy data in first sdmcc buff without the img - header
+        for (i = IMG_HDR_SZ; i < SDMMC_BLOCK_SZ; i += sizeof(uint32_t)) {
+            alt_write_word(data_dest_p, alt_read_word(data_src_p));
+            data_src_p++;
+            data_dest_p++;
+        }
+        //read rest of image
+        uint32_t img_block_sz = (img_hdr_p->img_size & 0xFFFFFE00) + SDMMC_BLOCK_SZ; //round - up to nearest block boundary
+        sd_addr += SDMMC_BLOCK_SZ;
+        while (img_block_sz) {
+            uint32_t chunk_sz = 256 * 1024;
+            if (chunk_sz > img_block_sz)
+                chunk_sz = img_block_sz;
+            MPL_WATCHDOG;
+            status = alt_sdmmc_read(&card_info, data_dest_p, (void *)sd_addr, chunk_sz);
+            if (status != ALT_E_SUCCESS) {
+                ALT_PRINTF("SDMMC read img ERROR\n\r");
+                return status;
+            }
+            data_dest_p += chunk_sz / sizeof(uint32_t);
+            sd_addr += chunk_sz;
+            img_block_sz -= chunk_sz;
+        }
+    }
+    else {
+        for (i = IMG_HDR_SZ; i < (img_hdr_p->img_size); i += sizeof(uint32_t)) {
+            alt_write_word(data_dest_p, alt_read_word(data_src_p));
+            data_src_p++;
+            data_dest_p++;
+        }
+    }
+    return ALT_E_SUCCESS;
+}
 
 ALT_STATUS_CODE sdmmc_load(void)
 {
     int i;
-    uint32_t *data_src_p, *data_dest_p;
-    uint32_t img_block_sz, image_addr, sd_base = 0, raw = 0, sd_addr = 0;
+    uint32_t sd_base = 0, raw = 0;
 
     //initialize sdmmc
     ALT_STATUS_CODE status = alt_sdmmc_init();
@@ -124,68 +178,12 @@ ALT_STATUS_CODE sdmmc_load(void)
         sd_base = 0;
     }
     ///read next image header using sd_base found above as the base address
-    sd_addr = (sd_base * SDMMC_BLOCK_SZ) + CONFIG_PRELOADER_SDMMC_NEXT_BOOT_IMAGE; //start addr is lba needs to be byte address for read func below
-    status = alt_sdmmc_read(&card_info, sdmmc_buf, (void *) (sd_addr), SDMMC_BLOCK_SZ);
-    if (status != ALT_E_SUCCESS) {
-        ALT_PRINTF("SDMMC read header ERROR\n\r");
+    //start addr is lba needs to be byte address for read func below
+    status = load_region((sd_base * SDMMC_BLOCK_SZ) + CONFIG_PRELOADER_SDMMC_NEXT_BOOT_IMAGE, 0);
+    if (status != ALT_E_SUCCESS)
         return status;
-    }
-    img_hdr_p = (img_header_t *) sdmmc_buf;
-    //swap endianess
-    if (MKIMG_MAGIC != SWAP_UINT32(img_hdr_p->magic)) {
-        ALT_PRINTF("Invalid Image Magic #\n\r");
-        return -1;
-    };
-    img_hdr_p->img_size = SWAP_UINT32(img_hdr_p->img_size);
-    img_hdr_p->load_addr = SWAP_UINT32(img_hdr_p->load_addr);
-    img_hdr_p->entry_point = SWAP_UINT32(img_hdr_p->entry_point);
-    image_addr = img_hdr_p->load_addr + img_hdr_p->entry_point;
-    data_src_p = (uint32_t *) & sdmmc_buf[IMG_HDR_SZ]; //start copying after the img header
-    data_dest_p = (uint32_t *) img_hdr_p->load_addr;
-    if (img_hdr_p->img_size > (SDMMC_BLOCK_SZ - IMG_HDR_SZ)) {
-        //copy data in first sdmcc buff without the img - header
-        for (i = IMG_HDR_SZ; i < SDMMC_BLOCK_SZ; i += sizeof(uint32_t)) {
-            alt_write_word(data_dest_p, alt_read_word(data_src_p));
-            data_src_p++;
-            data_dest_p++;
-        }
-        //read rest of image
-        img_block_sz = (img_hdr_p->img_size & 0xFFFFFE00) + SDMMC_BLOCK_SZ; //round - up to nearest block boundary
-        sd_addr += SDMMC_BLOCK_SZ;
-        while (img_block_sz) {
-            uint32_t chunk_sz = 256 * 1024;
-            if (chunk_sz > img_block_sz)
-                chunk_sz = img_block_sz;
-            MPL_WATCHDOG;
-            status = alt_sdmmc_read(&card_info, data_dest_p, (void *) (sd_addr), chunk_sz);
-            if (status != ALT_E_SUCCESS) {
-                ALT_PRINTF("SDMMC read img ERROR\n\r");
-                return status;
-            }
-            data_dest_p += chunk_sz / sizeof(uint32_t);
-            sd_addr += chunk_sz;
-            img_block_sz -= chunk_sz;
-        }
-    }
-    else {
-        for (i = IMG_HDR_SZ; i < (img_hdr_p->img_size); i += sizeof(uint32_t)) {
-            alt_write_word(data_dest_p, alt_read_word(data_src_p));
-            data_src_p++;
-            data_dest_p++;
-        }
-    }
     ALT_PRINTF("SDMMC next image read complete\n\r");
     MPL_WATCHDOG
-#if (CONFIG_PRELOADER_CHECKSUM_NEXT_IMAGE == 1)
-    img_hdr_p->dcrc = SWAP_UINT32(img_hdr_p->dcrc);
-    //validate crc checksum
-    uint32_t crc_val = crc32(0, (uint8_t *) img_hdr_p->load_addr, img_hdr_p->img_size);
-    if (crc_val != img_hdr_p->dcrc) {
-        ALT_PRINTF("IMG CRC ERROR\n\r");
-        return ALT_E_ERROR;
-    }
-    MPL_WATCHDOG
-#endif
 #if (CONFIG_PRELOADER_STATE_REG_ENABLE == 1)
     alt_write_word(CONFIG_PRELOADER_STATE_REG, CONFIG_PRELOADER_STATE_VALID);
 #endif
@@ -202,48 +200,11 @@ ALT_STATUS_CODE sdmmc_load(void)
     }
     ALT_PRINTF("Starting to read FPGA configuration from SDMMC.\r\n");
     ///read fpga image header using sd_base found above as the base address
-    sd_addr = (sd_base * SDMMC_BLOCK_SZ) + CONFIG_PRELOADER_FPGA_IMAGE_SDMMC_ADDR; //start addr is lba needs to be byte address for read func below
-    status = alt_sdmmc_read(&card_info, sdmmc_buf, (void *) (sd_addr), SDMMC_BLOCK_SZ);
-    if (status != ALT_E_SUCCESS) {
-        ALT_PRINTF("SDMMC read header ERROR\n\r");
+    status = load_region((sd_base * SDMMC_BLOCK_SZ) + CONFIG_PRELOADER_FPGA_IMAGE_SDMMC_ADDR, 1);
+    if (status != ALT_E_SUCCESS)
         return status;
-    }
-    img_hdr_p = (img_header_t *) sdmmc_buf;
-    //swap endianess
-    img_hdr_p->img_size = SWAP_UINT32(img_hdr_p->img_size);
-    img_hdr_p->load_addr = SWAP_UINT32(img_hdr_p->load_addr);
-    data_src_p = (uint32_t *) & sdmmc_buf[IMG_HDR_SZ]; //start copying after the img header
-    data_dest_p = (uint32_t *) img_hdr_p->load_addr;
-    if (img_hdr_p->img_size > (SDMMC_BLOCK_SZ - IMG_HDR_SZ)) {
-        //copy data in first sdmcc buff without the img - header
-        for (i = IMG_HDR_SZ; i < SDMMC_BLOCK_SZ; i += sizeof(uint32_t)) {
-            alt_write_word(data_dest_p, alt_read_word(data_src_p));
-            data_src_p++;
-            data_dest_p++;
-        }
-        //read rest of image
-        img_block_sz = (img_hdr_p->img_size & 0xFFFFFE00) + SDMMC_BLOCK_SZ; //round - up to nearest block boundary
-        status = alt_sdmmc_read(&card_info, data_dest_p, (void *) (sd_addr + SDMMC_BLOCK_SZ), img_block_sz);
-    }
-    else { //case where img_size is less than the initial block
-        for (i = 0; i < (img_hdr_p->img_size); i += sizeof(uint32_t)) {
-            alt_write_word(data_dest_p, alt_read_word(data_src_p));
-            data_src_p++;
-            data_dest_p++;
-        }
-    }
     ALT_PRINTF("Completed reading of FPGA configuration contents. Configure FPGA next...\r\n");
     MPL_WATCHDOG
-#if (CONFIG_PRELOADER_CHECKSUM_NEXT_IMAGE == 1)
-    img_hdr_p->dcrc = SWAP_UINT32(img_hdr_p->dcrc);
-    //validate crc checksum
-    crc_val = crc32(0, (uint8_t *) img_hdr_p->load_addr, img_hdr_p->img_size);
-    if (crc_val != img_hdr_p->dcrc) {
-        ALT_PRINTF("FPGA IMG CRC ERROR\n\r");
-        return ALT_E_ERROR;
-    }
-    MPL_WATCHDOG
-#endif
     status = alt_fpga_configure((void *) img_hdr_p->load_addr, img_hdr_p->img_size);
     if (status != ALT_E_SUCCESS) {
         ALT_PRINTF("FPGA Programming ERR\r\n");
